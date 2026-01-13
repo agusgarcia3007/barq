@@ -1,28 +1,29 @@
-# Stage 1: Build environment
-FROM rust:1.75-bookworm AS builder
+# --- ETAPA 1: Builder (Compilación) ---
+FROM rust:1.75-bookworm as builder
 
-# Install io_uring development libraries and clang for optimized builds
-RUN apt-get update && apt-get install -y \
-    liburing-dev \
-    clang \
-    && rm -rf /var/lib/apt/lists/*
+WORKDIR /usr/src/barq
 
-WORKDIR /app
+# Instalamos dependencias de sistema necesarias para Glommio/io_uring
+RUN apt-get update && apt-get install -y liburing-dev clang lld
+
+# Copiamos los archivos del proyecto
 COPY . .
 
-# Native CPU optimizations for maximum SIMD utilization
-ENV RUSTFLAGS="-C target-cpu=native"
-
+# Compilamos en modo release
+# RUSTFLAGS permite optimizar para la CPU destino si fuera necesario
 RUN cargo build --release
 
-# Stage 2: Minimal runtime image
+# --- ETAPA 2: Runner (Imagen Final Ligera) ---
 FROM debian:bookworm-slim
 
-# Runtime dependency for io_uring
-RUN apt-get update && apt-get install -y \
-    liburing2 \
-    && rm -rf /var/lib/apt/lists/*
+# Instalamos solo la librería runtime de io_uring
+RUN apt-get update && apt-get install -y liburing2 && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder /app/target/release/barq /usr/local/bin/
+# Copiamos el binario desde la etapa anterior
+COPY --from=builder /usr/src/barq/target/release/barq /usr/local/bin/barq
 
+# Exponemos el puerto (si tu app escucha en alguno, ej 8080)
+# EXPOSE 8080
+
+# Comando de arranque
 CMD ["barq"]
