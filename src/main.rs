@@ -1,107 +1,98 @@
+mod catalog;
 mod error;
-mod query;
+mod executor;
+mod protocol;
 mod storage;
+mod types;
 
 use std::sync::Arc;
-use std::time::Instant;
 
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use pgwire::api::auth::md5pass::MakeMd5PasswordAuthStartupHandler;
+use pgwire::api::auth::DefaultServerParameterProvider;
+use pgwire::tokio::process_socket;
 use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
-use crate::error::{DbError, DbResult};
-use crate::query::QueryEngine;
+use crate::catalog::Catalog;
+use crate::protocol::{BarqAuthSource, MakeBarqHandler};
+use crate::storage::StorageEngine;
 
-const PORT: u16 = 8080;
+const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 #[tokio::main]
-async fn main() -> DbResult<()> {
-    println!("Barq v0.1.0 - SQL Engine");
-    println!("Starting TCP server on port {}...", PORT);
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Initialize logging
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| "barq=info".into()),
+        )
+        .with(tracing_subscriber::fmt::layer())
+        .init();
 
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", PORT))
-        .await
-        .map_err(DbError::IoError)?;
+    // Get configuration from environment
+    let host = std::env::var("BARQ_HOST").unwrap_or_else(|_| "0.0.0.0".to_string());
+    let port = std::env::var("BARQ_PORT")
+        .ok()
+        .and_then(|p| p.parse().ok())
+        .unwrap_or(5432);
+    let username = std::env::var("BARQ_USER").unwrap_or_else(|_| "barq".to_string());
+    let password = std::env::var("BARQ_PASSWORD").unwrap_or_else(|_| "barq".to_string());
 
-    println!("Barq listening on 0.0.0.0:{}", PORT);
-    println!("Ready to accept connections.\n");
+    println!("╔══════════════════════════════════════════════════════════╗");
+    println!("║                    Barq v{}                           ║", VERSION);
+    println!("║     Lightning-fast PostgreSQL-compatible database        ║");
+    println!("╠══════════════════════════════════════════════════════════╣");
+    println!("║  Powered by Apache Arrow columnar storage                ║");
+    println!("╚══════════════════════════════════════════════════════════╝");
+    println!();
 
-    let engine = Arc::new(Mutex::new(QueryEngine::new()));
+    // Initialize catalog and storage
+    let catalog = Arc::new(Catalog::new());
+    let storage = Arc::new(StorageEngine::new());
 
+    // Create handler factory
+    let handler_factory = Arc::new(MakeBarqHandler::new(catalog.clone(), storage.clone()));
+
+    // Create auth source
+    let mut auth_source = BarqAuthSource::new();
+    auth_source.add_user(&username, &password);
+
+    // Create authenticator
+    let authenticator = Arc::new(MakeMd5PasswordAuthStartupHandler::new(
+        Arc::new(auth_source),
+        Arc::new(DefaultServerParameterProvider::new()),
+    ));
+
+    // Bind to address
+    let addr = format!("{}:{}", host, port);
+    let listener = TcpListener::bind(&addr).await?;
+
+    tracing::info!("Barq listening on {}", addr);
+    println!("Listening on postgresql://{}:{}@{}:{}/barq", username, password, host, port);
+    println!();
+    println!("Ready to accept connections.");
+
+    // Accept connections
     loop {
         match listener.accept().await {
-            Ok((stream, addr)) => {
-                let engine = engine.clone();
+            Ok((socket, peer_addr)) => {
+                tracing::info!("New connection from {}", peer_addr);
+
+                let handler = handler_factory.make();
+                let authenticator = authenticator.make();
+
                 tokio::spawn(async move {
-                    if let Err(e) = handle_connection(stream, engine, addr.to_string()).await {
-                        eprintln!("Connection error: {}", e);
+                    if let Err(e) = process_socket(socket, None, authenticator, handler.clone(), handler).await
+                    {
+                        tracing::error!("Connection error: {}", e);
                     }
+                    tracing::info!("Connection closed: {}", peer_addr);
                 });
             }
             Err(e) => {
-                eprintln!("Accept error: {}", e);
+                tracing::error!("Accept error: {}", e);
             }
         }
     }
-}
-
-async fn handle_connection(
-    stream: tokio::net::TcpStream,
-    engine: Arc<Mutex<QueryEngine>>,
-    peer: String,
-) -> DbResult<()> {
-    println!("New connection from {}", peer);
-
-    let (reader, mut writer) = stream.into_split();
-    let mut reader = BufReader::new(reader);
-
-    // Send welcome message
-    writer
-        .write_all(b"Barq v0.1.0 - SQL Engine\nReady.\n")
-        .await
-        .map_err(DbError::IoError)?;
-
-    let mut line = String::new();
-
-    loop {
-        line.clear();
-        let bytes_read = reader.read_line(&mut line).await.map_err(DbError::IoError)?;
-
-        if bytes_read == 0 {
-            println!("Connection closed: {}", peer);
-            break;
-        }
-
-        let sql = line.trim();
-        if sql.is_empty() {
-            continue;
-        }
-
-        if sql.eq_ignore_ascii_case("exit") || sql.eq_ignore_ascii_case("quit") {
-            writer
-                .write_all(b"Goodbye!\n")
-                .await
-                .map_err(DbError::IoError)?;
-            break;
-        }
-
-        let start = Instant::now();
-        let response = {
-            let mut eng = engine.lock().await;
-            match eng.execute(sql) {
-                Ok(result) => {
-                    let elapsed = start.elapsed();
-                    format!("{}\n({} us)\n", result.to_response(), elapsed.as_micros())
-                }
-                Err(e) => format!("Error: {}\n", e),
-            }
-        };
-
-        writer
-            .write_all(response.as_bytes())
-            .await
-            .map_err(DbError::IoError)?;
-    }
-
-    Ok(())
 }
