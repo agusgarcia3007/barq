@@ -1,6 +1,7 @@
+use arrow::array::{Array, Int32Array, StringArray};
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
-use arrow::util::pretty::print_batches;
+use prettytable::{Cell, Row, Table};
 use sqlparser::ast::{Expr, SetExpr, Statement, TableFactor, Value};
 use sqlparser::dialect::GenericDialect;
 use sqlparser::parser::Parser;
@@ -27,8 +28,12 @@ impl QueryEngine {
         let statement = statements.into_iter().next().ok_or(DbError::EmptyQuery)?;
 
         match statement {
-            Statement::CreateTable(create) => self.execute_create_table(create),
-            Statement::Insert(insert) => self.execute_insert(insert),
+            Statement::CreateTable { name, columns, .. } => {
+                self.execute_create_table(name.to_string(), columns)
+            }
+            Statement::Insert { table_name, source, .. } => {
+                self.execute_insert(table_name.to_string(), source)
+            }
             Statement::Query(query) => self.execute_query(*query),
             other => Err(DbError::UnsupportedStatement(format!("{:?}", other))),
         }
@@ -36,11 +41,10 @@ impl QueryEngine {
 
     fn execute_create_table(
         &mut self,
-        create: sqlparser::ast::CreateTable,
+        table_name: String,
+        columns: Vec<sqlparser::ast::ColumnDef>,
     ) -> DbResult<QueryResult> {
-        let table_name = create.name.to_string();
-        let columns: Vec<(String, DataType)> = create
-            .columns
+        let cols: Vec<(String, DataType)> = columns
             .iter()
             .map(|col| {
                 let dtype = sql_type_to_arrow(&col.data_type);
@@ -50,22 +54,25 @@ impl QueryEngine {
 
         let schema = TableSchema {
             name: table_name.clone(),
-            columns,
+            columns: cols,
         };
 
         self.catalog.create_table(schema)?;
         Ok(QueryResult::Success(format!("Created table {}", table_name)))
     }
 
-    fn execute_insert(&mut self, insert: sqlparser::ast::Insert) -> DbResult<QueryResult> {
-        let table_name = insert.table.to_string();
+    fn execute_insert(
+        &mut self,
+        table_name: String,
+        source: Option<Box<sqlparser::ast::Query>>,
+    ) -> DbResult<QueryResult> {
         let table = self.catalog.get_table(&table_name)?;
         let schema = table.schema().clone();
 
         let mut builder = BatchBuilder::new(&schema);
 
-        if let Some(source) = insert.source {
-            if let SetExpr::Values(values) = *source.body {
+        if let Some(query) = source {
+            if let SetExpr::Values(values) = *query.body {
                 for row in values.rows {
                     for (i, expr) in row.into_iter().enumerate() {
                         let (col_name, col_type) = &schema.columns[i];
@@ -159,11 +166,62 @@ impl QueryResult {
                 if batches.is_empty() {
                     println!("(empty result set)");
                 } else {
-                    print_batches(batches).map_err(DbError::from)?;
+                    print_batches(batches);
                 }
                 Ok(())
             }
         }
+    }
+}
+
+fn print_batches(batches: &[RecordBatch]) {
+    if batches.is_empty() {
+        return;
+    }
+
+    let mut table = Table::new();
+    let schema = batches[0].schema();
+
+    // Header row
+    let headers: Vec<Cell> = schema
+        .fields()
+        .iter()
+        .map(|f| Cell::new(f.name()))
+        .collect();
+    table.add_row(Row::new(headers));
+
+    // Data rows
+    for batch in batches {
+        for row_idx in 0..batch.num_rows() {
+            let cells: Vec<Cell> = (0..batch.num_columns())
+                .map(|col_idx| {
+                    let col = batch.column(col_idx);
+                    let value = get_cell_value(col.as_ref(), row_idx);
+                    Cell::new(&value)
+                })
+                .collect();
+            table.add_row(Row::new(cells));
+        }
+    }
+
+    table.printstd();
+}
+
+fn get_cell_value(array: &dyn Array, idx: usize) -> String {
+    if array.is_null(idx) {
+        return "NULL".to_string();
+    }
+
+    match array.data_type() {
+        DataType::Int32 => {
+            let arr = array.as_any().downcast_ref::<Int32Array>().unwrap();
+            arr.value(idx).to_string()
+        }
+        DataType::Utf8 => {
+            let arr = array.as_any().downcast_ref::<StringArray>().unwrap();
+            arr.value(idx).to_string()
+        }
+        _ => "?".to_string(),
     }
 }
 

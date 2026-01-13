@@ -1,14 +1,14 @@
 [package]
 name = "barq"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
 # Async runtime - thread-per-core with io_uring
 glommio = "0.8"
 
 # Columnar data format for SIMD-friendly scans
-arrow = { version = "53.0", features = ["prettyprint"] }
+arrow = "53.0"
 
 # SQL parsing (AST generation only)
 sqlparser = "0.43"

@@ -1,5 +1,5 @@
 # --- ETAPA 1: Builder (Compilación) ---
-FROM rust:1.75-bookworm as builder
+FROM rust:1.85-bookworm AS builder
 
 WORKDIR /usr/src/barq
 
