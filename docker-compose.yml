@@ -14,19 +14,6 @@ services:
     volumes:
       - barq_data:/var/lib/barq
 
-    # Ajustes para Glommio/io_uring
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-      nofile:
-        soft: 65535
-        hard: 65535
-
-    cap_add:
-      - IPC_LOCK
-      - SYS_NICE
-
     environment:
       - RUST_LOG=info
 

@@ -4,8 +4,8 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# Async runtime - thread-per-core with io_uring
-glommio = "0.8"
+# Async runtime
+tokio = { version = "1.0", features = ["rt-multi-thread", "net", "io-util", "macros", "sync"] }
 
 # Columnar data format for SIMD-friendly scans
 arrow = "53.0"
@@ -18,9 +18,6 @@ prettytable-rs = "0.10"
 
 # Error handling without panic
 thiserror = "1.0"
-
-# Async utilities for stdin reading
-futures-lite = "2.0"
 
 [profile.release]
 opt-level = 3

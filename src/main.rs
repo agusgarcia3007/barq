@@ -2,68 +2,41 @@ mod error;
 mod query;
 mod storage;
 
-use std::cell::RefCell;
-use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Instant;
 
-use futures_lite::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use futures_lite::AsyncReadExt;
-use glommio::net::TcpListener;
-use glommio::{LocalExecutorBuilder, Placement};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 
 use crate::error::{DbError, DbResult};
 use crate::query::QueryEngine;
 
 const PORT: u16 = 8080;
 
-fn main() -> DbResult<()> {
-    println!("Barq v0.1.0 - Thread-Per-Core SQL Engine");
+#[tokio::main]
+async fn main() -> DbResult<()> {
+    println!("Barq v0.1.0 - SQL Engine");
     println!("Starting TCP server on port {}...", PORT);
 
-    LocalExecutorBuilder::new(Placement::Fixed(0))
-        .name("barq-core-0")
-        .spawn(|| async move { run_server().await })
-        .map_err(|e| {
-            DbError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("{}", e),
-            ))
-        })?
-        .join()
-        .map_err(|e| {
-            DbError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("{:?}", e),
-            ))
-        })??;
-
-    Ok(())
-}
-
-async fn run_server() -> DbResult<()> {
-    let listener = TcpListener::bind(format!("0.0.0.0:{}", PORT)).map_err(|e| {
-        DbError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("{}", e),
-        ))
-    })?;
+    let listener = TcpListener::bind(format!("0.0.0.0:{}", PORT))
+        .await
+        .map_err(DbError::IoError)?;
 
     println!("Barq listening on 0.0.0.0:{}", PORT);
     println!("Ready to accept connections.\n");
 
-    // Shared engine for all connections (single-threaded, no locks needed)
-    let engine = Rc::new(RefCell::new(QueryEngine::new()));
+    let engine = Arc::new(Mutex::new(QueryEngine::new()));
 
     loop {
         match listener.accept().await {
-            Ok(stream) => {
+            Ok((stream, addr)) => {
                 let engine = engine.clone();
-                glommio::spawn_local(async move {
-                    if let Err(e) = handle_connection(stream, engine).await {
+                tokio::spawn(async move {
+                    if let Err(e) = handle_connection(stream, engine, addr.to_string()).await {
                         eprintln!("Connection error: {}", e);
                     }
-                })
-                .detach();
+                });
             }
             Err(e) => {
                 eprintln!("Accept error: {}", e);
@@ -73,36 +46,26 @@ async fn run_server() -> DbResult<()> {
 }
 
 async fn handle_connection(
-    stream: glommio::net::TcpStream,
-    engine: Rc<RefCell<QueryEngine>>,
+    stream: tokio::net::TcpStream,
+    engine: Arc<Mutex<QueryEngine>>,
+    peer: String,
 ) -> DbResult<()> {
-    let peer = stream
-        .peer_addr()
-        .map(|a| a.to_string())
-        .unwrap_or_else(|_| "unknown".to_string());
     println!("New connection from {}", peer);
 
-    let mut buffered = BufReader::new(stream);
+    let (reader, mut writer) = stream.into_split();
+    let mut reader = BufReader::new(reader);
 
     // Send welcome message
-    let welcome = b"Barq v0.1.0 - Thread-Per-Core SQL Engine\nReady.\n";
-    buffered.get_mut().write_all(welcome).await.map_err(|e| {
-        DbError::IoError(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("{}", e),
-        ))
-    })?;
+    writer
+        .write_all(b"Barq v0.1.0 - SQL Engine\nReady.\n")
+        .await
+        .map_err(DbError::IoError)?;
 
     let mut line = String::new();
 
     loop {
         line.clear();
-        let bytes_read = buffered.read_line(&mut line).await.map_err(|e| {
-            DbError::IoError(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("{}", e),
-            ))
-        })?;
+        let bytes_read = reader.read_line(&mut line).await.map_err(DbError::IoError)?;
 
         if bytes_read == 0 {
             println!("Connection closed: {}", peer);
@@ -115,22 +78,16 @@ async fn handle_connection(
         }
 
         if sql.eq_ignore_ascii_case("exit") || sql.eq_ignore_ascii_case("quit") {
-            buffered
-                .get_mut()
+            writer
                 .write_all(b"Goodbye!\n")
                 .await
-                .map_err(|e| {
-                    DbError::IoError(std::io::Error::new(
-                        std::io::ErrorKind::Other,
-                        format!("{}", e),
-                    ))
-                })?;
+                .map_err(DbError::IoError)?;
             break;
         }
 
         let start = Instant::now();
         let response = {
-            let mut eng = engine.borrow_mut();
+            let mut eng = engine.lock().await;
             match eng.execute(sql) {
                 Ok(result) => {
                     let elapsed = start.elapsed();
@@ -140,16 +97,10 @@ async fn handle_connection(
             }
         };
 
-        buffered
-            .get_mut()
+        writer
             .write_all(response.as_bytes())
             .await
-            .map_err(|e| {
-                DbError::IoError(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("{}", e),
-                ))
-            })?;
+            .map_err(DbError::IoError)?;
     }
 
     Ok(())
