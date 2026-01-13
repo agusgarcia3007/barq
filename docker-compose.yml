@@ -6,11 +6,7 @@ services:
     container_name: barq-engine
     restart: unless-stopped
 
-    # REPL interactivo - mantener entrada abierta
-    tty: true
-    stdin_open: true
-
-    # Puerto TCP (preparado para servidor)
+    # Puerto TCP del servidor SQL
     ports:
       - "8080:8080"
 

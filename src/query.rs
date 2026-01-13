@@ -157,26 +157,27 @@ pub enum QueryResult {
 
 impl QueryResult {
     pub fn display(&self) -> DbResult<()> {
+        println!("{}", self.to_response());
+        Ok(())
+    }
+
+    pub fn to_response(&self) -> String {
         match self {
-            QueryResult::Success(msg) => {
-                println!("{}", msg);
-                Ok(())
-            }
+            QueryResult::Success(msg) => msg.clone(),
             QueryResult::Batches(batches) => {
                 if batches.is_empty() {
-                    println!("(empty result set)");
+                    "(empty result set)".to_string()
                 } else {
-                    print_batches(batches);
+                    format_batches(batches)
                 }
-                Ok(())
             }
         }
     }
 }
 
-fn print_batches(batches: &[RecordBatch]) {
+fn format_batches(batches: &[RecordBatch]) -> String {
     if batches.is_empty() {
-        return;
+        return String::new();
     }
 
     let mut table = Table::new();
@@ -204,7 +205,7 @@ fn print_batches(batches: &[RecordBatch]) {
         }
     }
 
-    table.printstd();
+    table.to_string()
 }
 
 fn get_cell_value(array: &dyn Array, idx: usize) -> String {
