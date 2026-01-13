@@ -1,0 +1,28 @@
+[package]
+name = "barq"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+# Async runtime - thread-per-core with io_uring
+glommio = "0.8"
+
+# Columnar data format for SIMD-friendly scans
+arrow = { version = "53.0", features = ["prettyprint"] }
+
+# SQL parsing (AST generation only)
+sqlparser = "0.43"
+
+# Table formatting for REPL output
+prettytable-rs = "0.10"
+
+# Error handling without panic
+thiserror = "1.0"
+
+# Async utilities for stdin reading
+futures-lite = "2.0"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
